@@ -225,7 +225,7 @@ const encodeIfds = (ifds) => {
   return result.buffer;
 };
 
-const encodeImage = (values, width, height, metadata) => {
+const encodeImage = (values, width, height, metadata, rawMetadata) => {
   if (height === undefined || height === null) {
     throw new Error(`you passed into encodeImage a width of type ${height}`);
   }
@@ -256,13 +256,36 @@ const encodeImage = (values, width, height, metadata) => {
 
   const samplesPerPixel = ifd[277];
 
-  const data = new Uint8Array(numBytesInIfd + (width * height * samplesPerPixel));
+  const data = new Uint8Array(numBytesInIfd + (values.length * rawMetadata.BitsPerSample[0]/8 * samplesPerPixel));
   times(prfx.length, (i) => {
     data[i] = prfx[i];
   });
-  forEach(img, (value, i) => {
-    data[numBytesInIfd + i] = value;
-  });
+
+  for (let i = 0, vl = values.length; i < vl; i++) {
+    const value = values[i]
+    const buffer = new ArrayBuffer(rawMetadata.BitsPerSample[0]/8)
+    const view = new DataView(buffer)
+
+    const writeBytesFunc = {
+      1: {
+        8: view.setUint8.bind(view), 16: view.setUint16.bind(view), 32: view.setUint32.bind(view)
+      },
+      2: {
+        8: view.setInt8.bind(view), 16: view.setInt16.bind(view), 32: view.setInt32.bind(view)
+      },
+      3: {
+        32: view.setFloat32.bind(view), 64: view.setFloat64.bind(view)
+      }
+    }
+
+    writeBytesFunc[rawMetadata.SampleFormat[0]][rawMetadata.BitsPerSample[0]](0, value, false)
+    const uint8 = new Uint8Array(view.buffer)
+    const idx = numBytesInIfd + i * rawMetadata.BitsPerSample[0]/8;
+    for(let k=0;k<rawMetadata.BitsPerSample[0]/8;k++){
+        let _idx = idx + k;
+        data[_idx] = uint8[k]
+    }
+  }
 
   return data.buffer;
 };
@@ -326,10 +349,49 @@ export function writeGeotiff(data, metadata) {
   delete metadata.width;
 
   // consult https://www.loc.gov/preservation/digital/formats/content/tiff_tags.shtml
-
-  if (!metadata.BitsPerSample) {
-    metadata.BitsPerSample = times(numBands, () => 8);
+  
+  let sampleFormat = 1, bitsPerSample = 8;
+  switch(metadata.dataType){
+    case 'float32':
+      sampleFormat = 3;
+      bitsPerSample = 32;
+      break;
+    case 'float64':
+      sampleFormat = 3;
+      bitsPerSample = 64;
+      break;
+    case 'uint8':
+      sampleFormat = 1;
+      bitsPerSample = 8;
+      break;
+    case 'uint16':
+      sampleFormat = 1;
+      bitsPerSample = 16;
+      break;
+    case 'uint32':
+      sampleFormat = 1;
+      bitsPerSample = 32;
+      break;
+    case 'int8':
+      sampleFormat = 2;
+      bitsPerSample = 8;
+      break;
+    case 'int16':
+      sampleFormat = 2;
+      bitsPerSample = 16;
+      break;
+    case 'int32':
+      sampleFormat = 2;
+      bitsPerSample = 32;
+      break;
+    default:
+      sampleFormat = 1;
+      bitsPerSample = 8;
   }
+  metadata.BitsPerSample = times(numBands, () => bitsPerSample);
+  metadata.SampleFormat = times(numBands, () => sampleFormat);
+
+  delete metadata.dataType;
 
   metadataDefaults.forEach((tag) => {
     const key = tag[0];
@@ -352,7 +414,7 @@ export function writeGeotiff(data, metadata) {
 
   if (!metadata.StripByteCounts) {
     // we are only writing one strip
-    metadata.StripByteCounts = [numBands * height * width];
+    metadata.StripByteCounts = [numBands * height * width * metadata.BitsPerSample];
   }
 
   if (!metadata.ModelPixelScale) {
@@ -360,9 +422,6 @@ export function writeGeotiff(data, metadata) {
     metadata.ModelPixelScale = [360 / width, 180 / height, 0];
   }
 
-  if (!metadata.SampleFormat) {
-    metadata.SampleFormat = times(numBands, () => 1);
-  }
 
   // if didn't pass in projection information, assume the popular 4326 "geographic projection"
   if (!metadata.hasOwnProperty('GeographicTypeGeoKey') && !metadata.hasOwnProperty('ProjectedCSTypeGeoKey')) {
@@ -450,7 +509,7 @@ export function writeGeotiff(data, metadata) {
 
   const encodedMetadata = convertToTids(metadata);
 
-  const outputImage = encodeImage(flattenedValues, width, height, encodedMetadata);
+  const outputImage = encodeImage(flattenedValues, width, height, encodedMetadata, metadata);
 
   return outputImage;
 }
